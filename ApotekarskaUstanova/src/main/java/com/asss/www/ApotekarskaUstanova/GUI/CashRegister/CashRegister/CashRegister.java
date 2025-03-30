@@ -33,6 +33,7 @@ import javax.swing.text.DocumentFilter;
 import com.asss.www.ApotekarskaUstanova.Dto.EmployeeDto;
 import com.asss.www.ApotekarskaUstanova.GUI.CashRegister.SalesHistory.SalesHistory;
 import com.asss.www.ApotekarskaUstanova.GUI.Start.MainMenuAdmin.MainMenuAdmin;
+import com.asss.www.ApotekarskaUstanova.GUI.Start.StartPage.StartPage;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import net.miginfocom.swing.MigLayout;
 
@@ -1329,7 +1330,7 @@ public class CashRegister extends JFrame {
 
     private void backMouseClicked(MouseEvent e) {
         dispose();
-        MainMenuAdmin.start();
+        StartPage.start();
     }
 
     public void customizeTable(JTable table, TableModel model) {
