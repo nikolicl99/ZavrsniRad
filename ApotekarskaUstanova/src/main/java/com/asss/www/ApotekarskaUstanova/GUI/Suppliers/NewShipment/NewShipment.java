@@ -14,11 +14,8 @@ import javax.swing.table.DefaultTableModel;
 import javax.swing.table.JTableHeader;
 import javax.swing.table.TableModel;
 
+import com.asss.www.ApotekarskaUstanova.Dto.*;
 import com.asss.www.ApotekarskaUstanova.Repository.ProductBatchRepository;
-import com.asss.www.ApotekarskaUstanova.Dto.ProductBatchDto;
-import com.asss.www.ApotekarskaUstanova.Dto.ProductDto;
-import com.asss.www.ApotekarskaUstanova.Dto.ShipmentDto;
-import com.asss.www.ApotekarskaUstanova.Dto.SupplierDto;
 import com.asss.www.ApotekarskaUstanova.Entity.Location;
 import com.asss.www.ApotekarskaUstanova.GUI.Start.MainMenuAdmin.MainMenuAdmin;
 import com.asss.www.ApotekarskaUstanova.Security.JwtResponse;
@@ -28,15 +25,21 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.github.lgooddatepicker.components.*;
 import net.miginfocom.swing.*;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.common.PDRectangle;
+import org.apache.pdfbox.pdmodel.font.PDType0Font;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.ClassPathResource;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
+import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -508,7 +511,9 @@ public class NewShipment extends JFrame {
 
     private int getProductIdByName(String productName) {
         try {
-            URL url = new URL("http://localhost:8080/api/products/name/" + URLEncoder.encode(productName, "UTF-8"));
+            String encodedName = URLEncoder.encode(productName, StandardCharsets.UTF_8);
+            encodedName = encodedName.replace("+", "%20");
+            URL url = new URL("http://localhost:8080/api/products/name/" + encodedName);
             HttpURLConnection connection = (HttpURLConnection) url.openConnection();
             connection.setRequestMethod("GET");
             connection.setRequestProperty("Authorization", "Bearer " + JwtResponse.getToken());
@@ -677,7 +682,8 @@ public class NewShipment extends JFrame {
         return -1; // Return -1 if an error occurs
     }
 
-    public int addShipment(int supplierId, LocalDate arrivalDate, String arrivalTime) {
+    private int addShipment(int supplierId, LocalDate arrivalDate, String arrivalTime) {
+        int employeeId = JwtResponse.getUserId();
         try {
             URL url = new URL("http://localhost:8080/api/shipment/add");
             HttpURLConnection connection = (HttpURLConnection) url.openConnection();
@@ -709,6 +715,19 @@ public class NewShipment extends JFrame {
                     // Parse JSON response into ShipmentDto
                     ShipmentDto shipmentDto = objectMapper.readValue(response, ShipmentDto.class);
 
+                    // Generate receipt
+                    String supplierName = getSupplierNameById(supplierId);
+                    LocalTime time = LocalTime.parse(arrivalTime);
+                    String employeeName = fetchEmployeeName(employeeId);
+                    generateReceipt(
+                            shipmentDto.getId(),
+                            arrivalDate,
+                            time,
+                            supplierName,
+                            employeeName,
+                            itemsList
+                    );
+
                     // Return the ID of the created Shipment
                     return shipmentDto.getId();
                 }
@@ -719,6 +738,29 @@ public class NewShipment extends JFrame {
             e.printStackTrace();
         }
         return -1; // Return -1 if an error occurs
+    }
+
+    private String fetchEmployeeName(int employeeId) {
+        try {
+            URL url = new URL("http://localhost:8080/api/employees/" + employeeId);
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("Authorization", "Bearer " + JwtResponse.getToken());
+
+            if (connection.getResponseCode() == HttpURLConnection.HTTP_OK) {
+                try (Scanner scanner = new Scanner(connection.getInputStream())) {
+                    String response = scanner.useDelimiter("\\A").next();
+                    EmployeeDto employee = objectMapper.readValue(response, EmployeeDto.class);
+
+                    return employee.getName() + " " + employee.getSurname();
+                }
+            } else {
+                return "Nepoznati zaposleni";
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "Greška pri učitavanju zaposlenog";
+        }
     }
 
     public void addShipmentItem(int shipmentId, int productId, int quantity) {
@@ -759,6 +801,162 @@ public class NewShipment extends JFrame {
             JOptionPane.showMessageDialog(this, "Datum mora biti nakon trenutnog datuma!", "Greška", JOptionPane.ERROR_MESSAGE);
             datePicker.setDate(LocalDate.now());
         }
+    }
+
+    public static void generateReceipt(int shipmentId, LocalDate arrivalDate, LocalTime arrivalTime,
+                                       String supplierName, String employeeName, List<Map<String, Object>> items) {
+        try (PDDocument document = new PDDocument()) {
+            // 1. Izračunavanje dimenzija koristeći metode
+            int maxLineLength = calculateMaxLineLength(shipmentId, arrivalDate, arrivalTime, supplierName, items);
+            int totalLines = calculateTotalLines(items);
+
+            // 2. Dinamičko određivanje širina kolona
+            int maxNameLength = items.stream()
+                    .mapToInt(item -> ((String)item.get("Naziv proizvoda")).length())
+                    .max()
+                    .orElse(15);
+            maxNameLength = Math.min(Math.max(maxNameLength, 10), 25);
+
+            int col1Width = maxNameLength + 4;
+            int col2Width = 8;
+            int col3Width = 12;
+            int tableWidth = col1Width + col2Width + col3Width + 4;
+
+            // 3. Postavke stranice
+            int lineHeight = 15;
+            int margin = 15;
+            int pageWidth = Math.min(Math.max(maxLineLength + 2 * margin, 300), 595);
+            int pageHeight = Math.min(totalLines * lineHeight + 2 * margin, 842);
+
+            PDPage page = new PDPage(new PDRectangle(pageWidth, pageHeight));
+            document.addPage(page);
+
+            try (PDPageContentStream contentStream = new PDPageContentStream(document, page)) {
+                PDType0Font font = PDType0Font.load(document,
+                        new ClassPathResource("static/arial.ttf").getInputStream());
+
+                contentStream.setFont(font, 10);
+                contentStream.beginText();
+                contentStream.newLineAtOffset(margin, pageHeight - margin - 10);
+
+                // 4. Zaglavlje
+                String[] headerLines = {
+                        "===== PRIJEMNICA =====",
+                        "ID: " + shipmentId,
+                        "Datum: " + arrivalDate,
+                        "Vreme: " + arrivalTime.format(DateTimeFormatter.ofPattern("HH:mm:ss")),
+                        "Blagajnik: " + employeeName,
+                        "Dobavljač: " + supplierName
+                };
+
+                for (String line : headerLines) {
+                    contentStream.showText(line);
+                    contentStream.newLineAtOffset(0, -lineHeight);
+                }
+
+                // Linija ispod zaglavlja (dužina naslova)
+                String headerSeparator = new String(new char[headerLines[0].length()]).replace('\0', '=');
+                contentStream.showText(headerSeparator);
+                contentStream.newLineAtOffset(0, -lineHeight);
+
+                // 5. Tabela proizvoda
+                String headerFormat = "%-" + col1Width + "s %" + col2Width + "s %" + col3Width + "s";
+                contentStream.showText(String.format(headerFormat, "Proizvod", "Količina", "Rok trajanja"));
+                contentStream.newLineAtOffset(0, -lineHeight);
+
+                // Linija ispod naslova tabele (tačna širina tabele)
+                String tableSeparator = new String(new char[tableWidth]).replace('\0', '-');
+                contentStream.showText(tableSeparator);
+                contentStream.newLineAtOffset(0, -lineHeight);
+
+                // Stavke
+                String itemFormat = "%-" + col1Width + "s %" + col2Width + "s %" + col3Width + "s";
+                for (Map<String, Object> item : items) {
+                    String productName = shorten(((String) item.get("Naziv proizvoda")), maxNameLength);
+                    contentStream.showText(String.format(itemFormat,
+                            productName,
+                            item.get("Kolicina").toString(),
+                            ((String) item.get("Rok trajanja")).substring(2)));
+                    contentStream.newLineAtOffset(0, -lineHeight);
+                }
+                contentStream.endText();
+            }
+
+            // 7. Čuvanje dokumenta
+            String folderPath = "receipts/shipments/" + arrivalDate;
+            Files.createDirectories(Paths.get(folderPath));
+            document.save(new File(folderPath + "/Shipment_" + shipmentId + ".pdf"));
+
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static int calculateMaxLineLength(int shipmentId, LocalDate arrivalDate,
+                                              LocalTime arrivalTime, String supplierName,
+                                              List<Map<String, Object>> items) {
+        int maxLength = 0;
+        String[] headerLines = {
+                "===== PRIJEMNICA =====",
+                "ID: " + shipmentId,
+                "Datum: " + arrivalDate,
+                "Vreme: " + arrivalTime.format(DateTimeFormatter.ofPattern("HH:mm:ss")),
+                "Blagajnik: ...",
+                "Dobavljač: " + supplierName
+        };
+
+        for (String line : headerLines) {
+            maxLength = Math.max(maxLength, line.length() * 6);
+        }
+
+        // Izračunaj širinu za tabelu
+        int maxNameLength = items.stream()
+                .mapToInt(item -> ((String)item.get("Naziv proizvoda")).length())
+                .max()
+                .orElse(15);
+        maxNameLength = Math.min(Math.max(maxNameLength, 10), 25);
+
+        int col1Width = maxNameLength + 4;
+        int col2Width = 8;
+        int col3Width = 12;
+        int tableWidth = col1Width + col2Width + col3Width + 4;
+
+        maxLength = Math.max(maxLength, tableWidth * 6);
+
+        String footer = "Ukupno: " + items.size() + " proizvoda";
+        return Math.max(maxLength, footer.length() * 6);
+    }
+
+    private static int calculateTotalLines(List<Map<String, Object>> items) {
+        // Zaglavlje: 7 linija (naslov + 5 podataka + linija razdvajanja)
+        // Tabela: 2 linije (header + separator)
+        // Stavke: items.size()
+        return 7 + 2 + items.size();
+    }
+
+    private static String shorten(String text, int maxLength) {
+        return text.length() > maxLength ? text.substring(0, maxLength - 3) + "..." : text;
+    }
+
+    private String getSupplierNameById(int supplierId) {
+        try {
+            URL url = new URL("http://localhost:8080/api/suppliers/" + supplierId);
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("Authorization", "Bearer " + JwtResponse.getToken());
+
+            if (connection.getResponseCode() == HttpURLConnection.HTTP_OK) {
+                try (Scanner scanner = new Scanner(connection.getInputStream())) {
+                    String response = scanner.useDelimiter("\\A").next();
+                    ObjectMapper mapper = new ObjectMapper();
+                    SupplierDto supplier = mapper.readValue(response, SupplierDto.class);
+                    return supplier.getName();
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return "Nepoznat dobavljač";
     }
 
     private void backMouseClicked(MouseEvent e) {
